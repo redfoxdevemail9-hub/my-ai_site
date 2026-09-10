@@ -1,34 +1,31 @@
 // ============================================================
 //  api/chat.js
-//  هذا الملف يشتغل فقط على سيرفر Vercel (خلف الكواليس)
-//  المستخدم أو أي زائر لا يقدر يشوف محتواه أو المفتاح إطلاقاً
+//  هذا الملف يشتغل فقط على سيرفر Vercel (خلف الكواليس).
+//  كل زائر يرسل مفتاحه الخاص عبر الهيدر X-User-Api-Key، ونستخدمه
+//  فقط لتمرير الطلب إلى Ollama لحظياً — لا يُخزَّن هنا ولا في أي
+//  قاعدة بيانات أو ملف؛ يعيش فقط طوال مدة هذا الطلب بالذاكرة.
 // ============================================================
 
 export default async function handler(req, res) {
-  // نسمح فقط بطلبات POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
     const { prompt, history } = req.body;
+    const apiKey = req.headers['x-user-api-key'];
+
+    if (!apiKey || typeof apiKey !== 'string') {
+      return res.status(401).json({ error: 'API key is missing' });
+    }
 
     if (!prompt || typeof prompt !== 'string') {
       return res.status(400).json({ error: 'Prompt parameter is missing' });
     }
 
-    // المفتاح يُقرأ من Environment Variables في Vercel
-    // لا يظهر أبداً في الكود أو في الشبكة (Network tab)
-    const apiKey = process.env.OLLAMA_API_KEY;
-
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Server misconfiguration: missing API key' });
-    }
-
     const targetModel = 'gemma4:31b';
-    const systemPrompt = 'اسمك هو RedFoxiq'; // غيّره لاسم موقعك
+    const systemPrompt = 'اسمك هو RedFoxiq';
 
-    // بناء الرسائل: system + التاريخ السابق (إن وجد) + الرسالة الجديدة
     const messages = [{ role: 'system', content: systemPrompt }];
 
     if (Array.isArray(history)) {
@@ -41,7 +38,6 @@ export default async function handler(req, res) {
 
     messages.push({ role: 'user', content: prompt });
 
-    // إرسال الطلب الحقيقي إلى Ollama من طرف السيرفر (مخفي تماماً عن المستخدم)
     const ollamaResponse = await fetch('https://ollama.com/api/chat', {
       method: 'POST',
       headers: {
@@ -55,12 +51,15 @@ export default async function handler(req, res) {
       }),
     });
 
+    if (ollamaResponse.status === 401 || ollamaResponse.status === 403) {
+      return res.status(401).json({ error: 'Invalid or expired API key' });
+    }
+
     if (!ollamaResponse.ok || !ollamaResponse.body) {
       const errText = await ollamaResponse.text();
       return res.status(502).json({ error: 'Upstream error', details: errText });
     }
 
-    // إعداد الاستجابة كـ Stream (SSE) للموقع
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -75,7 +74,7 @@ export default async function handler(req, res) {
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // نحتفظ بالسطر غير المكتمل
+      buffer = lines.pop();
 
       for (const line of lines) {
         const trimmed = line.trim();
@@ -85,11 +84,10 @@ export default async function handler(req, res) {
           const json = JSON.parse(trimmed);
           const text = json?.message?.content;
           if (text) {
-            // نرسل فقط النص للواجهة، بدون أي تفاصيل عن Ollama أو المفتاح
             res.write(`data: ${JSON.stringify({ content: text })}\n\n`);
           }
         } catch (e) {
-          // تجاهل الأسطر غير الصالحة JSON
+          // تجاهل الأسطر غير الصالحة
         }
       }
     }
@@ -104,4 +102,3 @@ export default async function handler(req, res) {
     }
   }
 }
-
